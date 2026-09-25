@@ -29,7 +29,8 @@ def fast_tfidf_blocking(
     Perform multi-resolution candidate blocking using character 3/4-gram TF-IDF
     sparse matrix multiplication with direct C/NumPy CSR pointer slicing.
     
-    Handles empty DataFrames and zero-match edge cases cleanly.
+    Strictly purges intermediate Python string lists immediately after vectorization
+    to maintain minimal RAM usage.
     """
     if checkpoint_file and os.path.exists(checkpoint_file):
         print(f"Loading cached blocking results from {checkpoint_file}...", flush=True)
@@ -51,9 +52,8 @@ def fast_tfidf_blocking(
     
     # Combined representation: normalized name + first 3 address tokens
     s2s3_comb = [str(n) + " " + " ".join(str(a).split()[:3]).lower() for n, a in zip(s2s3_names, s2s3_addrs)]
-    s1_comb = [str(n) + " " + " ".join(str(a).split()[:3]).lower() for n, a in zip(s1_names, s1_addrs)]
     
-    # Character 3-gram TF-IDF with min_df and max_df to eliminate ubiquitous n-grams
+    # Character 3-gram TF-IDF
     vectorizer = TfidfVectorizer(
         analyzer="char_wb",
         ngram_range=(3, 4),
@@ -66,10 +66,17 @@ def fast_tfidf_blocking(
     
     print(f"  Fitting TF-IDF on {len(s2s3_comb):,} candidate records...", flush=True)
     m2 = vectorizer.fit_transform(s2s3_comb)
+    
+    # IMMEDIATELY PURGE s2s3_comb TO FREE ~3.5 GB RAM BEFORE MATRIX MULTIPLICATION
+    del s2s3_comb
+    gc.collect()
+    
+    s1_comb = [str(n) + " " + " ".join(str(a).split()[:3]).lower() for n, a in zip(s1_names, s1_addrs)]
     print(f"  Transforming {len(s1_comb):,} reference records...", flush=True)
     m1 = vectorizer.transform(s1_comb)
     
-    del s2s3_comb, s1_comb, vectorizer
+    # IMMEDIATELY PURGE s1_comb AND VECTORIZER
+    del s1_comb, vectorizer
     gc.collect()
     
     candidates = defaultdict(list)

@@ -15,6 +15,7 @@ import time
 # Guarantee unbuffered line-by-line streaming output in Kaggle subprocesses
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
+
 import argparse
 import pickle
 import psutil
@@ -93,7 +94,7 @@ def main():
     print(f"Output Directory: {args.output_dir}", flush=True)
 
     # =========================================================================
-    # STAGE 1: TRAINING DATA & MODEL
+    # STAGE 1: TRAINING DATA & MODEL (STREAMING COUNTRY INGESTION)
     # =========================================================================
     model_checkpoint = os.path.join(args.checkpoint_dir, "lgbm_model.pkl")
     
@@ -125,72 +126,73 @@ def main():
             s1_train = s1_train.sample(n=args.sample_train, random_state=42).reset_index(drop=True)
         s1_train["clean_name"] = s1_train["business_name"].apply(clean_text)
         
-        # Load S2 and S3 Train
-        s2_train = pd.read_csv(os.path.join(train_dir, "train_source2.tsv"), sep="\t")
-        s3_train = pd.read_csv(os.path.join(train_dir, "train_source3.tsv"), sep="\t")
-        s2_train["clean_name"] = s2_train["business_name"].apply(clean_text)
-        s3_train["clean_name"] = s3_train["business_name"].apply(clean_text)
-        s2s3_train = pd.concat([s2_train, s3_train], ignore_index=True)
-        del s2_train, s3_train
-        gc.collect()
-        
-        print(f"  Sampled S1 reference: {len(s1_train):,} | Candidate S2/S3 pool: {len(s2s3_train):,}", flush=True)
-        
-        # Build Vectorized Lookups
-        s1_lookup = build_entity_lookup(s1_train)
-        cand_lookup = build_entity_lookup(s2s3_train)
-        
-        # Block US and India
-        train_candidates = {}
-        for ctry in ["US", "India"]:
-            s1_c = s1_train[s1_train["country"] == ctry]
-            s2s3_c = s2s3_train[s2s3_train["country"] == ctry]
-            print(f"  Running blocking for {ctry} training partition...", flush=True)
-            train_candidates.update(fast_tfidf_blocking(s1_c, s2s3_c, top_k=10, batch_size=args.batch_size))
-            
-        del s1_train, s2s3_train
-        gc.collect()
-        
-        # Construct Labeled Pairs Matrix
-        print("  Extracting training features with hard negatives...", flush=True)
         X_list, y_list, group_list, pair_meta = [], [], [], []
         
-        for sid, cand_tuples in train_candidates.items():
-            if sid not in s1_lookup:
+        # Stream training data country by country: US -> India
+        for ctry in ["US", "India"]:
+            print(f"\n  --- Ingesting Training Slice for {ctry} ---", flush=True)
+            s1_c = s1_train[s1_train["country"] == ctry].copy()
+            if s1_c.empty:
                 continue
-            sn, sa, sp = s1_lookup[sid]
-            true_set = gt_map.get(sid, set())
-            cand_dict = dict(cand_tuples)
+                
+            s2_c = load_country_slice(os.path.join(train_dir, "train_source2.tsv"), ctry)
+            s3_c = load_country_slice(os.path.join(train_dir, "train_source3.tsv"), ctry)
+            s2s3_c = pd.concat([s2_c, s3_c], ignore_index=True)
+            del s2_c, s3_c
+            gc.collect()
             
-            # Positives
-            for mid in true_set:
-                if mid in cand_lookup:
-                    cn, ca, cp = cand_lookup[mid]
-                    score = cand_dict.get(mid, 0.5)
-                    X_list.append(extract_pair_features(sn, sa, sp, cn, ca, cp, score))
-                    y_list.append(1)
-                    group_list.append(sid)
-                    pair_meta.append((sid, mid))
+            print(f"    Sampled {ctry} S1: {len(s1_c):,} | Candidate pool: {len(s2s3_c):,} | RAM: {get_ram_usage()}", flush=True)
+            
+            # Build Vectorized Lookups
+            s1_lookup_c = build_entity_lookup(s1_c, country=ctry)
+            cand_lookup_c = build_entity_lookup(s2s3_c, country=ctry)
+            
+            # Blocking for ctry
+            train_cands_c = fast_tfidf_blocking(s1_c, s2s3_c, top_k=10, batch_size=args.batch_size)
+            del s1_c, s2s3_c
+            gc.collect()
+            
+            # Extract features for ctry
+            for sid, cand_tuples in train_cands_c.items():
+                if sid not in s1_lookup_c:
+                    continue
+                sn, sa, sp = s1_lookup_c[sid]
+                true_set = gt_map.get(sid, set())
+                cand_dict = dict(cand_tuples)
+                
+                # Positives
+                for mid in true_set:
+                    if mid in cand_lookup_c:
+                        cn, ca, cp = cand_lookup_c[mid]
+                        score = cand_dict.get(mid, 0.5)
+                        X_list.append(extract_pair_features(sn, sa, sp, cn, ca, cp, score))
+                        y_list.append(1)
+                        group_list.append(sid)
+                        pair_meta.append((sid, mid))
+                        
+                # Hard Negatives
+                negs = [c for c in cand_tuples if c[0] not in true_set and c[0] in cand_lookup_c]
+                if len(negs) > args.max_neg:
+                    negs = negs[:args.max_neg]
                     
-            # Hard Negatives
-            negs = [c for c in cand_tuples if c[0] not in true_set and c[0] in cand_lookup]
-            if len(negs) > args.max_neg:
-                negs = negs[:args.max_neg]
-                
-            for nid, score in negs:
-                cn, ca, cp = cand_lookup[nid]
-                X_list.append(extract_pair_features(sn, sa, sp, cn, ca, cp, score))
-                y_list.append(0)
-                group_list.append(sid)
-                pair_meta.append((sid, nid))
-                
-        del s1_lookup, cand_lookup, train_candidates
+                for nid, score in negs:
+                    cn, ca, cp = cand_lookup_c[nid]
+                    X_list.append(extract_pair_features(sn, sa, sp, cn, ca, cp, score))
+                    y_list.append(0)
+                    group_list.append(sid)
+                    pair_meta.append((sid, nid))
+                    
+            del s1_lookup_c, cand_lookup_c, train_cands_c
+            gc.collect()
+            print(f"    Finished {ctry} training features | Total pairs so far: {len(X_list):,} | RAM: {get_ram_usage()}", flush=True)
+
+        del s1_train
         gc.collect()
         
         X_arr = np.array(X_list, dtype=np.float32)
         y_arr = np.array(y_list, dtype=np.float32)
         group_arr = np.array(group_list)
-        print(f"  Constructed {len(X_arr):,} labeled pairs in {(time.time() - t_stage1):.1f}s | RAM: {get_ram_usage()}", flush=True)
+        print(f"\n  Constructed {len(X_arr):,} labeled pairs in {(time.time() - t_stage1):.1f}s | RAM: {get_ram_usage()}", flush=True)
         
         # Train Model
         model, best_tau, best_f05, val_auc = train_lightgbm_model(
