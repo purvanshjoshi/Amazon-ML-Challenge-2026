@@ -6,6 +6,7 @@ High-speed C-accelerated TF-IDF character n-gram cosine retrieval using direct C
 import time
 import gc
 import os
+import sys
 import pickle
 import numpy as np
 import pandas as pd
@@ -28,36 +29,29 @@ def fast_tfidf_blocking(
     Perform multi-resolution candidate blocking using character 3/4-gram TF-IDF
     sparse matrix multiplication with direct C/NumPy CSR pointer slicing.
     
-    Args:
-        s1_df: DataFrame of reference S1 entities
-        s2s3_df: DataFrame of candidate S2/S3 entities
-        top_k: Maximum number of top candidates to retrieve per S1 entity
-        batch_size: S1 batch size for matrix multiplication (2,500 prevents memory bloat)
-        max_features: Maximum TF-IDF feature vocabulary size
-        min_df: Minimum document frequency to prune noise
-        max_df: Maximum document frequency to prune overly common n-grams (e.g. 'inc', 'llc')
-        checkpoint_file: Optional path to save/load cached blocking results
-        
-    Returns:
-        dict: {s1_id: [(candidate_id, tfidf_cosine_score), ...]}
+    Handles empty DataFrames and zero-match edge cases cleanly.
     """
     if checkpoint_file and os.path.exists(checkpoint_file):
         print(f"Loading cached blocking results from {checkpoint_file}...", flush=True)
         with open(checkpoint_file, "rb") as f:
             return pickle.load(f)
 
+    if s1_df.empty or s2s3_df.empty:
+        print("  Notice: Empty S1 or S2/S3 partition. Skipping blocking.", flush=True)
+        return defaultdict(list)
+
     t0 = time.time()
     s1_ids = s1_df["entity_id"].values
-    s1_names = s1_df["clean_name"].values
+    s1_names = s1_df["clean_name"].fillna("").values
     s1_addrs = s1_df["business_address"].fillna("").values
     
     s2s3_ids = s2s3_df["entity_id"].values
-    s2s3_names = s2s3_df["clean_name"].values
+    s2s3_names = s2s3_df["clean_name"].fillna("").values
     s2s3_addrs = s2s3_df["business_address"].fillna("").values
     
     # Combined representation: normalized name + first 3 address tokens
-    s2s3_comb = [n + " " + " ".join(a.split()[:3]).lower() for n, a in zip(s2s3_names, s2s3_addrs)]
-    s1_comb = [n + " " + " ".join(a.split()[:3]).lower() for n, a in zip(s1_names, s1_addrs)]
+    s2s3_comb = [str(n) + " " + " ".join(str(a).split()[:3]).lower() for n, a in zip(s2s3_names, s2s3_addrs)]
+    s1_comb = [str(n) + " " + " ".join(str(a).split()[:3]).lower() for n, a in zip(s1_names, s1_addrs)]
     
     # Character 3-gram TF-IDF with min_df and max_df to eliminate ubiquitous n-grams
     vectorizer = TfidfVectorizer(
@@ -83,7 +77,6 @@ def fast_tfidf_blocking(
     
     # Direct pointer slicing on CSR matrix in fast batches of 2,500
     print(f"  Performing sparse matrix cosine retrieval in batches of {batch_size:,}...", flush=True)
-    t_last_log = time.time()
     
     for bs in range(0, total_s1, batch_size):
         be = min(bs + batch_size, total_s1)

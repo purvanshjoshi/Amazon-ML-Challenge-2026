@@ -35,8 +35,12 @@ def apply_graph_postprocessing(
     final_matches = defaultdict(set)
     s1_max_prob = defaultdict(float)
     
+    # Pre-build fast probability lookup for O(1) match capping
+    pair_prob_lookup = {}
+    
     # 1. Greedy Bipartite Matching (1-to-1 Cardinality Enforcement)
     for (sid, cid), prob in pair_records:
+        pair_prob_lookup[(sid, cid)] = prob
         s1_max_prob[sid] = max(s1_max_prob[sid], prob)
         if prob >= tau_match and cid not in assigned_cand:
             final_matches[sid].add(cid)
@@ -47,12 +51,12 @@ def apply_graph_postprocessing(
         if max_p < tau_singleton:
             final_matches[sid] = set()
             
-    # 3. Match Count Cap (<= 11)
+    # 3. Match Count Cap (<= 11) using O(1) probability lookups
     for sid in list(final_matches.keys()):
         if len(final_matches[sid]) > max_matches:
             top_matches = sorted(
                 final_matches[sid],
-                key=lambda c: next(p for (s, cd), p in pair_records if s == sid and cd == c),
+                key=lambda c: pair_prob_lookup.get((sid, c), 0.0),
                 reverse=True
             )
             final_matches[sid] = set(top_matches[:max_matches])
@@ -64,6 +68,7 @@ def write_submission_tsv(filepath: str, all_s1_ids: list, matches_dict: dict):
     """
     Write matching_results.tsv in the exact required tab-separated format:
     source1_entity_id\\tmatched_entity_ids (comma-separated, sorted, no spaces)
+    Guarantees all S1 test IDs appear in exact input order.
     """
     with open(filepath, "w", encoding="utf-8") as f:
         f.write("source1_entity_id\tmatched_entity_ids\n")
@@ -78,6 +83,7 @@ def write_submission_tsv(filepath: str, all_s1_ids: list, matches_dict: dict):
 def write_candidates_tsv(filepath: str, all_s1_ids: list, candidate_dict: dict):
     """
     Write candidate_pairs.tsv in the exact required tab-separated format.
+    Guarantees all S1 test IDs appear in exact input order.
     """
     with open(filepath, "w", encoding="utf-8") as f:
         f.write("source1_entity_id\tcandidate_entity_ids\n")

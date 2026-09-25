@@ -11,6 +11,10 @@ import os
 import gc
 import sys
 import time
+
+# Guarantee unbuffered line-by-line streaming output in Kaggle subprocesses
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
 import argparse
 import pickle
 import psutil
