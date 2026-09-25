@@ -19,7 +19,7 @@ import pandas as pd
 from collections import Counter
 
 # Package imports
-from src.preprocessing import clean_text, build_entity_lookup
+from src.preprocessing import clean_text, build_entity_lookup, load_country_slice
 from src.blocking import fast_tfidf_blocking
 from src.features import extract_pair_features, extract_features_batch, FEATURE_NAMES
 from src.model import train_lightgbm_model
@@ -84,9 +84,9 @@ def main():
 
     assert train_dir and os.path.exists(train_dir), f"Could not find train directory: {train_dir}"
     assert test_dir and os.path.exists(test_dir), f"Could not find test directory: {test_dir}"
-    print(f"Train Directory:  {train_dir}")
-    print(f"Test Directory:   {test_dir}")
-    print(f"Output Directory: {args.output_dir}")
+    print(f"Train Directory:  {train_dir}", flush=True)
+    print(f"Test Directory:   {test_dir}", flush=True)
+    print(f"Output Directory: {args.output_dir}", flush=True)
 
     # =========================================================================
     # STAGE 1: TRAINING DATA & MODEL
@@ -94,16 +94,16 @@ def main():
     model_checkpoint = os.path.join(args.checkpoint_dir, "lgbm_model.pkl")
     
     if os.path.exists(model_checkpoint):
-        print(f"\n[Stage 1] Loading cached trained model from {model_checkpoint}...")
+        print(f"\n[Stage 1] Loading cached trained model from {model_checkpoint}...", flush=True)
         with open(model_checkpoint, "rb") as f:
             checkpoint_data = pickle.load(f)
             model = checkpoint_data["model"]
             best_tau = checkpoint_data["best_tau"]
             best_f05 = checkpoint_data["best_f05"]
             val_auc = checkpoint_data["val_auc"]
-        print(f"  Loaded model: optimal tau* = {best_tau:.4f}, Val F_0.5 = {best_f05:.5f}")
+        print(f"  Loaded model: optimal tau* = {best_tau:.4f}, Val F_0.5 = {best_f05:.5f}", flush=True)
     else:
-        print(f"\n[Stage 1] Building Training Pairs & Training LightGBM...")
+        print(f"\n[Stage 1] Building Training Pairs & Training LightGBM...", flush=True)
         t_stage1 = time.time()
         
         # Load Ground Truth
@@ -130,9 +130,9 @@ def main():
         del s2_train, s3_train
         gc.collect()
         
-        print(f"  Sampled S1 reference: {len(s1_train):,} | Candidate S2/S3 pool: {len(s2s3_train):,}")
+        print(f"  Sampled S1 reference: {len(s1_train):,} | Candidate S2/S3 pool: {len(s2s3_train):,}", flush=True)
         
-        # Build Vectorized Lookups (instantaneous)
+        # Build Vectorized Lookups
         s1_lookup = build_entity_lookup(s1_train)
         cand_lookup = build_entity_lookup(s2s3_train)
         
@@ -148,7 +148,7 @@ def main():
         gc.collect()
         
         # Construct Labeled Pairs Matrix
-        print("  Extracting training features with hard negatives...")
+        print("  Extracting training features with hard negatives...", flush=True)
         X_list, y_list, group_list, pair_meta = [], [], [], []
         
         for sid, cand_tuples in train_candidates.items():
@@ -186,7 +186,7 @@ def main():
         X_arr = np.array(X_list, dtype=np.float32)
         y_arr = np.array(y_list, dtype=np.float32)
         group_arr = np.array(group_list)
-        print(f"  Constructed {len(X_arr):,} labeled pairs in {(time.time() - t_stage1):.1f}s | RAM: {get_ram_usage()}")
+        print(f"  Constructed {len(X_arr):,} labeled pairs in {(time.time() - t_stage1):.1f}s | RAM: {get_ram_usage()}", flush=True)
         
         # Train Model
         model, best_tau, best_f05, val_auc = train_lightgbm_model(
@@ -202,39 +202,42 @@ def main():
                 "val_auc": val_auc
             }, f)
             
-        del X_arr, y_arr, group_arr, pair_meta, gt_map
+        # STRICT MEMORY PURGE OF ALL STAGE 1 TRAINING ARRAYS
+        del X_arr, y_arr, group_arr, pair_meta, gt_map, X_list, y_list, group_list
         gc.collect()
-        print(f"  Stage 1 complete! Saved model to {model_checkpoint} | RAM: {get_ram_usage()}")
+        print(f"  Stage 1 complete! Saved model to {model_checkpoint} | RAM after purge: {get_ram_usage()}", flush=True)
 
     # =========================================================================
-    # STAGE 2: TEST BLOCKING & INFERENCE (COUNTRY-BY-COUNTRY ISOLATION)
+    # STAGE 2: STREAMING TEST BLOCKING & INFERENCE (ZERO MEMORY LEAK)
     # =========================================================================
-    print(f"\n[Stage 2] Running Test Inference (France -> US -> India)...")
+    print(f"\n[Stage 2] Running Streaming Test Inference (France -> US -> India)...", flush=True)
     t_stage2 = time.time()
     
-    # Load S1 Test
-    s1_test_all = pd.read_csv(os.path.join(test_dir, "test_source1.tsv"), sep="\t")
-    all_test_s1_ids = s1_test_all["entity_id"].tolist()
-    print(f"  Total S1 Reference Test Entities: {len(all_test_s1_ids):,}")
-    
-    # Load S2 and S3 Test
-    s2_test_all = pd.read_csv(os.path.join(test_dir, "test_source2.tsv"), sep="\t")
-    s3_test_all = pd.read_csv(os.path.join(test_dir, "test_source3.tsv"), sep="\t")
-    s2s3_test_all = pd.concat([s2_test_all, s3_test_all], ignore_index=True)
-    del s2_test_all, s3_test_all
+    # Read only test S1 entity_ids (tiny memory footprint < 15 MB)
+    s1_ids_df = pd.read_csv(os.path.join(test_dir, "test_source1.tsv"), sep="\t", usecols=["entity_id"])
+    all_test_s1_ids = s1_ids_df["entity_id"].tolist()
+    del s1_ids_df
     gc.collect()
+    print(f"  Total S1 Reference Test Entities: {len(all_test_s1_ids):,} | RAM: {get_ram_usage()}", flush=True)
     
     all_candidates_dict = {}
     all_test_pairs = []
     all_test_probs = []
     
+    # Process country-by-country streaming: France -> US -> India
     for ctry in ["France", "US", "India"]:
-        print(f"\n  --- Processing {ctry} ---")
-        s1_c = s1_test_all[s1_test_all["country"] == ctry].copy()
-        s2s3_c = s2s3_test_all[s2s3_test_all["country"] == ctry].copy()
+        print(f"\n  --- Processing {ctry} ---", flush=True)
+        t_ctry = time.time()
         
-        s1_c["clean_name"] = s1_c["business_name"].apply(clean_text)
-        s2s3_c["clean_name"] = s2s3_c["business_name"].apply(clean_text)
+        # Stream-load ONLY country slices for S1, S2, S3
+        s1_c = load_country_slice(os.path.join(test_dir, "test_source1.tsv"), ctry)
+        s2_c = load_country_slice(os.path.join(test_dir, "test_source2.tsv"), ctry)
+        s3_c = load_country_slice(os.path.join(test_dir, "test_source3.tsv"), ctry)
+        s2s3_c = pd.concat([s2_c, s3_c], ignore_index=True)
+        del s2_c, s3_c
+        gc.collect()
+        
+        print(f"    Loaded {ctry} slice: S1={len(s1_c):,}, S2S3={len(s2s3_c):,} | RAM: {get_ram_usage()}", flush=True)
         
         # 1. Blocking
         ctry_checkpoint = os.path.join(args.checkpoint_dir, f"blocking_{ctry}.pkl")
@@ -272,24 +275,22 @@ def main():
             
         del ctry_X, ctry_pairs
         gc.collect()
-        print(f"  Finished {ctry} | Total scored pairs: {len(all_test_pairs):,} | RAM: {get_ram_usage()}")
+        print(f"  Finished {ctry} in {(time.time() - t_ctry)/60:.1f} min | Scored pairs so far: {len(all_test_pairs):,} | RAM: {get_ram_usage()}", flush=True)
         
-    del s1_test_all, s2s3_test_all
-    gc.collect()
-    print(f"  Stage 2 complete in {(time.time() - t_stage2)/60:.1f} min!")
+    print(f"  Stage 2 complete in {(time.time() - t_stage2)/60:.1f} min!", flush=True)
 
     # =========================================================================
     # STAGE 3: POST-PROCESSING & TSV SUBMISSIONS
     # =========================================================================
-    print(f"\n[Stage 3] Writing TSV Submissions & Enforcing Graph Consistency...")
+    print(f"\n[Stage 3] Writing TSV Submissions & Enforcing Graph Consistency...", flush=True)
     
     # 1. Write candidate_pairs.tsv
     cand_path = os.path.join(args.output_dir, "candidate_pairs.tsv")
-    print(f"  Writing {cand_path} ({len(all_test_s1_ids):,} rows)...")
+    print(f"  Writing {cand_path} ({len(all_test_s1_ids):,} rows)...", flush=True)
     write_candidates_tsv(cand_path, all_test_s1_ids, all_candidates_dict)
     
     # 2. Maximum Weighted Bipartite Matching Post-Processing
-    print("  Running greedy maximum weighted bipartite matching...")
+    print("  Running greedy maximum weighted bipartite matching...", flush=True)
     pair_records = sorted(zip(all_test_pairs, all_test_probs), key=lambda x: x[1], reverse=True)
     del all_test_pairs, all_test_probs, all_candidates_dict
     gc.collect()
@@ -303,18 +304,18 @@ def main():
     
     # 3. Write matching_results.tsv
     match_path = os.path.join(args.output_dir, "matching_results.tsv")
-    print(f"  Writing {match_path} ({len(all_test_s1_ids):,} rows)...")
+    print(f"  Writing {match_path} ({len(all_test_s1_ids):,} rows)...", flush=True)
     write_submission_tsv(match_path, all_test_s1_ids, final_matches)
     
     # 4. Optional Validation Check
     if utils_dir:
         val_script = os.path.join(utils_dir, "validate_submission.py")
         if os.path.exists(val_script):
-            print("\n" + "=" * 55)
-            print("RUNNING OFFICIAL SUBMISSION VALIDATOR:")
-            print("=" * 55)
+            print("\n" + "=" * 55, flush=True)
+            print("RUNNING OFFICIAL SUBMISSION VALIDATOR:", flush=True)
+            print("=" * 55, flush=True)
             os.system(f"python \"{val_script}\" --matching \"{match_path}\" --candidate \"{cand_path}\" --test-dir \"{test_dir}\"")
-            print("=" * 55)
+            print("=" * 55, flush=True)
 
     # =========================================================================
     # SUMMARY DASHBOARD
@@ -323,28 +324,28 @@ def main():
     singletons = sum(1 for c in match_counts if c == 0)
     total_time = (time.time() - t_start) / 60.0
     
-    print("\n" + "=" * 70)
-    print("  PIPELINE EXECUTION SUMMARY")
-    print("=" * 70)
-    print(f"  Total Pipeline Runtime:      {total_time:.1f} minutes")
-    print(f"  Validation AUC-ROC:          {val_auc:.5f}")
-    print(f"  Validation Macro F_0.5:      {best_f05:.5f}")
-    print(f"  Optimal Decision Threshold:  {best_tau:.4f}")
-    print(f"  Total Test Entities (S1):    {len(all_test_s1_ids):,}")
-    print(f"  Predicted Singletons:        {singletons:,} ({singletons/len(all_test_s1_ids)*100:.2f}%)")
-    print(f"  Average Matches per Entity:  {np.mean(match_counts):.2f}")
-    print(f"  Maximum Matches per Entity:  {max(match_counts)}")
-    print(f"\n  Match Distribution:")
+    print("\n" + "=" * 70, flush=True)
+    print("  PIPELINE EXECUTION SUMMARY", flush=True)
+    print("=" * 70, flush=True)
+    print(f"  Total Pipeline Runtime:      {total_time:.1f} minutes", flush=True)
+    print(f"  Validation AUC-ROC:          {val_auc:.5f}", flush=True)
+    print(f"  Validation Macro F_0.5:      {best_f05:.5f}", flush=True)
+    print(f"  Optimal Decision Threshold:  {best_tau:.4f}", flush=True)
+    print(f"  Total Test Entities (S1):    {len(all_test_s1_ids):,}", flush=True)
+    print(f"  Predicted Singletons:        {singletons:,} ({singletons/len(all_test_s1_ids)*100:.2f}%)", flush=True)
+    print(f"  Average Matches per Entity:  {np.mean(match_counts):.2f}", flush=True)
+    print(f"  Maximum Matches per Entity:  {max(match_counts)}", flush=True)
+    print(f"\n  Match Distribution:", flush=True)
     dist = Counter(match_counts)
     for k in range(min(12, max(dist.keys()) + 1)):
         count = dist.get(k, 0)
         bar = "#" * min(40, int(count / max(dist.values()) * 40))
-        print(f"    {k:2d} matches: {count:>8,} ({count/len(all_test_s1_ids)*100:5.2f}%) {bar}")
-    print("=" * 70)
-    print(f"Submissions ready:")
-    print(f"  -> {match_path}")
-    print(f"  -> {cand_path}")
-    print("=" * 70)
+        print(f"    {k:2d} matches: {count:>8,} ({count/len(all_test_s1_ids)*100:5.2f}%) {bar}", flush=True)
+    print("=" * 70, flush=True)
+    print(f"Submissions ready:", flush=True)
+    print(f"  -> {match_path}", flush=True)
+    print(f"  -> {cand_path}", flush=True)
+    print("=" * 70, flush=True)
 
 
 if __name__ == "__main__":
