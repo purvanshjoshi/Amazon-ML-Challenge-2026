@@ -7,6 +7,8 @@
 
 Standalone production package for large-scale multi-source business entity resolution.
 
+> **Notice:** The pipeline is currently experimental/unstable and may encounter Out of Memory (OOM) issues on large datasets depending on system RAM.
+
 ---
 
 ## Package Architecture

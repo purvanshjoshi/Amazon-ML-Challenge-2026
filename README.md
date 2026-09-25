@@ -12,6 +12,8 @@ A scalable machine learning pipeline for multi-source business entity resolution
 
 ## Overview
 
+> **Notice:** The pipeline is currently experimental/unstable and may encounter Out of Memory (OOM) issues on large datasets depending on system RAM. Tuning streaming batch sizes (`--batch-size`) and candidate limits (`--top-k`) is recommended for resource-constrained environments.
+
 Entity Resolution (ER) identifies records referring to the same real-world business entity across independent data sources without shared unique identifiers.
 
 The dataset consists of **24.2 million total records** across three sources ($S_1$, $S_2$, $S_3$) spanning three countries (**US**, **India**, and **France**):
