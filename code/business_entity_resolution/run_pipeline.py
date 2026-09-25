@@ -60,6 +60,7 @@ def main():
     parser.add_argument("--output-dir", type=str, default="./output", help="Output directory for TSV submissions")
     parser.add_argument("--sample-train", type=int, default=100000, help="S1 sample size for training")
     parser.add_argument("--top-k", type=int, default=12, help="Top candidates per S1 entity")
+    parser.add_argument("--batch-size", type=int, default=2500, help="S1 batch size for sparse matrix multiplication")
     parser.add_argument("--max-neg", type=int, default=4, help="Max hard negatives per S1 entity")
     parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints", help="Directory for caching checkpoints")
     args = parser.parse_args()
@@ -68,10 +69,10 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
-    print("=" * 70)
-    print("  AMAZON ML CHALLENGE 2026: BUSINESS ENTITY RESOLUTION PIPELINE")
-    print("=" * 70)
-    print(f"Initial RAM: {get_ram_usage()}")
+    print("=" * 70, flush=True)
+    print("  AMAZON ML CHALLENGE 2026: BUSINESS ENTITY RESOLUTION PIPELINE", flush=True)
+    print("=" * 70, flush=True)
+    print(f"Initial RAM: {get_ram_usage()}", flush=True)
 
     # 1. Resolve Directories
     if args.data_dir:
@@ -140,8 +141,8 @@ def main():
         for ctry in ["US", "India"]:
             s1_c = s1_train[s1_train["country"] == ctry]
             s2s3_c = s2s3_train[s2s3_train["country"] == ctry]
-            print(f"  Running blocking for {ctry} training partition...")
-            train_candidates.update(fast_tfidf_blocking(s1_c, s2s3_c, top_k=10))
+            print(f"  Running blocking for {ctry} training partition...", flush=True)
+            train_candidates.update(fast_tfidf_blocking(s1_c, s2s3_c, top_k=10, batch_size=args.batch_size))
             
         del s1_train, s2s3_train
         gc.collect()
@@ -237,7 +238,7 @@ def main():
         
         # 1. Blocking
         ctry_checkpoint = os.path.join(args.checkpoint_dir, f"blocking_{ctry}.pkl")
-        cand_results = fast_tfidf_blocking(s1_c, s2s3_c, top_k=args.top_k, checkpoint_file=ctry_checkpoint)
+        cand_results = fast_tfidf_blocking(s1_c, s2s3_c, top_k=args.top_k, batch_size=args.batch_size, checkpoint_file=ctry_checkpoint)
         
         for sid, ctuples in cand_results.items():
             all_candidates_dict[sid] = [ct[0] for ct in ctuples]
