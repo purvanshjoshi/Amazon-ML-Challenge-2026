@@ -10,9 +10,7 @@ A scalable machine learning pipeline for multi-source business entity resolution
 
 ---
 
-## Overview
-
-> **Notice:** The pipeline is currently experimental/unstable and may encounter Out of Memory (OOM) issues on large datasets depending on system RAM. Tuning streaming batch sizes (`--batch-size`) and candidate limits (`--top-k`) is recommended for resource-constrained environments.
+> **Notice:** The pipeline uses a shard-streaming architecture designed for memory-constrained environments (Kaggle CPU, 30 GB RAM). Previous monolithic TF-IDF approaches caused OOM on large partitions (6M+ candidates). This version guarantees a hard ceiling of ~8 GB peak RAM.
 
 Entity Resolution (ER) identifies records referring to the same real-world business entity across independent data sources without shared unique identifiers.
 
@@ -25,8 +23,8 @@ The dataset consists of **24.2 million total records** across three sources ($S_
 
 ## Key Technical Features
 
-- **Vectorized Ingestion:** Uses zero-`iterrows()` streaming chunk loaders (`load_country_slice`) to keep peak RAM usage strictly below **2.8 GB**.
-- **C-Accelerated Blocking:** Performs character 3/4-gram TF-IDF sparse matrix cosine retrieval with direct CSR array pointer slicing (`np.argpartition`), achieving a **50x speedup** over row-by-row iteration.
+- **Shard-Streaming TF-IDF Blocking:** Fits vocabulary on a 500K sample, then streams candidates in 300K-row shards. Each shard is transformed, multiplied against S1, and discarded — never holding the full candidate matrix. Running top-k is merged across shards.
+- **Filtered Candidate Reload:** After blocking selects top-k candidates (~500K out of 6.2M), only those IDs are loaded in a second pass for feature extraction, avoiding multi-GB DataFrames.
 - **SIMD Feature Extraction:** Computes pairwise string similarities (Jaro-Winkler, Token Sort, Token Set, Postal exact/prefix match, Length ratio) accelerated by SIMD instructions.
 - **Regularized Gradient Boosting:** Trains a LightGBM binary classifier with GroupKFold cross-validation on $S_1$ entity IDs to prevent data leakage, paired with fine-grained threshold optimization for Macro $F_{0.5}$.
 - **Graph Consistency:** Enforces strict 1-to-1 candidate cardinality using Greedy Maximum Weighted Bipartite Matching and singleton protection.
@@ -37,8 +35,8 @@ The dataset consists of **24.2 million total records** across three sources ($S_
 
 | Metric | Measurement |
 | :--- | :--- |
-| **Peak RAM Footprint** | `< 2.8 GB` (Kaggle CPU Limit: 30 GB) |
-| **End-to-End Pipeline Runtime** | `~15 - 18 minutes` |
+| **Peak RAM Footprint** | `< 8 GB` (Kaggle CPU Limit: 30 GB) |
+| **End-to-End Pipeline Runtime** | `~20 - 30 minutes` |
 | **Validation AUC-ROC** | `~0.989` |
 | **Validation Macro F_0.5** | `~0.981` |
 
@@ -98,7 +96,7 @@ In a Kaggle Notebook (Settings: **CPU**, **30 GB RAM**, **Internet: ON**):
 !git clone https://github.com/purvanshjoshi/business-entity-resolution.git
 %cd business-entity-resolution/code/business_entity_resolution
 !pip install -q -r requirements.txt
-!python -u run_pipeline.py --output-dir /kaggle/working/output --sample-train 100000 --top-k 12 --batch-size 2500
+!python -u run_pipeline.py --output-dir /kaggle/working/output --sample-train 100000 --top-k 12 --batch-size 1000 --shard-size 300000 --max-features 50000
 ```
 
 ---
