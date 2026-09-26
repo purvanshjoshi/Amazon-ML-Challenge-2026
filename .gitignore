@@ -15,6 +15,7 @@ student_resource/
 # Model weights, intermediate caches & outputs
 checkpoints/
 output/
+Trained model with output/
 *.pkl
 *.model
 
